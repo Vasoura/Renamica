@@ -1,19 +1,18 @@
-# macOS
-.DS_Store
-*.swp
-*.swo
-
-# Python
-__pycache__/
-*.pyc
-*.pyo
 
 # Build artifacts
-build/
-dist/
-*.dmg
-Renamica-*.dmg
-
 # IDE
+# Python
+# macOS
+*.dmg
+*.pyc
+*.pyo
+*.swo
+*.swp
+.DS_Store
 .idea/
 .vscode/
+Renamica-*.dmg
+__pycache__/
+build/
+dist
+dist/

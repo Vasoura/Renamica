@@ -42,14 +42,6 @@ pip install -r requirements.txt
 python3 Renamica.py
 ```
 
-### 打包成 .app
-
-```bash
-pip install pyinstaller
-pyinstaller Renamica.spec --clean --noconfirm
-open dist/Renamica.app
-```
-
 ## 项目结构
 
 ```
@@ -58,13 +50,9 @@ Renamica/
 ├── Renamica.spec          # PyInstaller 打包配置
 ├── renamica.icns          # 应用图标
 ├── renamica_icon.png      # 1024×1024 源图标
-├── renamica_logo.png      # Logo 源文件
 ├── screenshot.png         # 截图
-├── convert_icon.py        # 图标生成脚本
 ├── requirements.txt       # 依赖
-├── README.md
-└── dist/
-    └── Renamica.app       # 打包好的应用
+└── README.md
 ```
 
 ## 使用说明
