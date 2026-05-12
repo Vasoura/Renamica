@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Build artifacts
+build/
+dist/
+*.dmg
+Renamica-*.dmg
+
+# IDE
+.idea/
+.vscode/
