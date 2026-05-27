@@ -30,7 +30,7 @@ macOS 批量文件重命名工具，支持拖拽、实时预览、撤销、冲�
 
 ### 下载 DMG
 
-从 [Releases 页面](https://github.com/Vasoura/Renamica/releases) 下载 `Renamica-1.0.0.dmg`，打开后将 `Renamica.app` 拖入 Applications 文件夹即可。
+从 [Releases 页面](https://github.com/Vasoura/Renamica/releases) 下载 `Renamica-1.0.1.dmg`，打开后将 `Renamica.app` 拖入 Applications 文件夹即可。
 
 ### 从源码运行
 
