@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout
                              QWidget, QListWidget, QListWidgetItem, QPushButton,
                              QLineEdit, QLabel, QGroupBox, QMessageBox, QProgressBar,
                              QTextEdit, QSplitter, QFrame, QCheckBox, QSpinBox, QComboBox,
-                             QFileDialog, QHeaderView, QAction, QMenu)
+                             QFileDialog, QHeaderView, QAction, QMenu, QAbstractItemView, QListView)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QMimeData, QUrl, QEvent
 from PyQt5.QtGui import QFont, QIcon, QDragEnterEvent, QDropEvent, QColor, QBrush, QDesktopServices
 
@@ -70,8 +70,8 @@ LOCALE = {
     # --- Delete ---
     "keyword_label": {"zh": "关键词:", "en": "Keyword:"},
     "keyword_ph": {"zh": "删除", "en": "Delete"},
-    "del_check": {"zh": "删", "en": "Del"},
-    "from_label": {"zh": "从", "en": "from"},
+    "del_check": {"zh": "删从", "en": "Del from"},
+    "from_label": {"zh": "", "en": ""},
     "del_label": {"zh": "位删", "en": "del"},
     "pos_label": {"zh": "位", "en": ""},
 
@@ -159,6 +159,7 @@ LOCALE = {
     "menu_quit": {"zh": "退出", "en": "Quit"},
     "menu_undo": {"zh": "撤销上次重命名", "en": "Undo Last Rename"},
     "menu_github": {"zh": "GitHub", "en": "GitHub"},
+    "menu_remove": {"zh": "从列表中移除", "en": "Remove from List"},
 
     # --- Language toggle ---
     "lang_toggle": {"zh": "中", "en": "EN"},
@@ -251,6 +252,57 @@ class DragDropListWidget(QListWidget):
             self.parent_gui.add_files_to_list(files)
         event.acceptProposedAction()
 
+    def contextMenuEvent(self, event):
+        selected_items = self.selectedItems()
+        if not selected_items:
+            item = self.itemAt(event.pos())
+            if not item:
+                return
+            selected_items = [item]
+            
+        cursor_item = self.itemAt(event.pos())
+        if cursor_item and cursor_item not in selected_items:
+            self.clearSelection()
+            cursor_item.setSelected(True)
+            selected_items = [cursor_item]
+            
+        rows = [self.row(item) for item in selected_items]
+        menu = QMenu(self)
+        
+        remove_action = QAction(_("menu_remove"), self)
+        remove_action.triggered.connect(lambda: self.parent_gui.remove_files_at(rows))
+        menu.addAction(remove_action)
+        
+        menu.exec_(event.globalPos())
+
+
+def is_path_conflict(candidate_path, file_path, allocated_paths):
+    cand_str = str(candidate_path)
+    cand_str_lower = cand_str.lower()
+    if any(p.lower() == cand_str_lower for p in allocated_paths):
+        return True
+        
+    if candidate_path.exists():
+        try:
+            if os.path.samefile(cand_str, str(file_path)):
+                return False
+        except OSError:
+            if cand_str_lower == str(file_path).lower():
+                return False
+        return True
+        
+    return False
+
+
+SORT_INDEX_TO_KEY = {
+    0: None,
+    1: "name",
+    2: "mtime",
+    3: "ctime",
+    4: "size",
+    5: "type"
+}
+
 
 def number_to_letter(number, digits, uppercase=False):
     """将数字转换为字母编号"""
@@ -271,9 +323,10 @@ class RenameWorker(QThread):
     finished = pyqtSignal(list, list)
     file_error = pyqtSignal(int, str)
 
-    def __init__(self, file_paths, rename_options, lang="zh"):
+    def __init__(self, file_paths, resolved_names, rename_options, lang="zh"):
         super().__init__()
         self.file_paths = file_paths
+        self.resolved_names = resolved_names
         self.rename_options = rename_options
         self.lang = lang
         self.new_paths = []
@@ -307,7 +360,7 @@ class RenameWorker(QThread):
                 parent_dir = path_obj.parent
                 original_name = path_obj.name
 
-                new_name = self.apply_rename_rules(original_name, i)
+                new_name = self.resolved_names[i] if i < len(self.resolved_names) else original_name
 
                 if not new_name or not new_name.strip():
                     msg = f"{self._tr('skip_empty')}: {original_name}"
@@ -407,9 +460,13 @@ class RenamicaGUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.file_paths = []
+        self.original_file_paths = []
+        self.resolved_names = []
         self.rename_history = []
         self.current_errors = {}
         self.current_conflicts = {}
+        self.current_sort_key = None
+        self.current_sort_ascending = True
         self.is_dark_mode = False
         self.lang = _current_lang
         self._sort_keys = None
@@ -417,7 +474,7 @@ class RenamicaGUI(QMainWindow):
 
     def init_ui(self):
         """初始化用户界面"""
-        self.setWindowTitle("Renamica v1.0")
+        self.setWindowTitle("Renamica v1.0.1")
         self.setGeometry(100, 100, 760, 540)
 
         self.create_menu_bar()
@@ -440,7 +497,7 @@ class RenamicaGUI(QMainWindow):
 
     def retranslate_ui(self):
         """切换语言后刷新所有文本"""
-        self.setWindowTitle("Renamica v1.0")
+        self.setWindowTitle("Renamica v1.0.1")
 
         self.file_group.setTitle(_("file_list"))
         self.find_replace_box.setTitle(_("find_replace"))
@@ -450,10 +507,18 @@ class RenamicaGUI(QMainWindow):
 
         self.sort_label.setText(_("sort"))
         current_sort = self.sort_combo.currentIndex()
+        self.sort_combo.blockSignals(True)
         self.sort_combo.clear()
-        self.sort_combo.addItems([_("sort_order"), _("sort_name"), _("sort_mtime"),
-                                  _("sort_ctime"), _("sort_size"), _("sort_type")])
+        self.sort_combo.addItems([
+            _("sort_order"),
+            _("sort_name"),
+            _("sort_mtime"),
+            _("sort_ctime"),
+            _("sort_size"),
+            _("sort_type")
+        ])
         self.sort_combo.setCurrentIndex(current_sort)
+        self.sort_combo.blockSignals(False)
 
         self.move_up_btn.setText(_("move_up"))
         self.move_down_btn.setText(_("move_down"))
@@ -502,15 +567,7 @@ class RenamicaGUI(QMainWindow):
         self.folder_import_flat.setText(_("folder_flat"))
         self.folder_import_recursive.setText(_("folder_recursive"))
 
-        self._sort_keys = {
-            _("sort_order"): None,
-            _("sort_name"): "name",
-            _("sort_mtime"): "mtime",
-            _("sort_ctime"): "ctime",
-            _("sort_size"): "size",
-            _("sort_type"): "type",
-        }
-
+        self.update_sort_combo_text()
         self.update_preview()
 
     def create_menu_bar(self):
@@ -592,30 +649,19 @@ class RenamicaGUI(QMainWindow):
         sort_bar.addWidget(self.sort_label)
 
         self.sort_combo = QComboBox()
-        self._sort_keys = {
-            _("sort_order"): None,
-            _("sort_name"): "name",
-            _("sort_mtime"): "mtime",
-            _("sort_ctime"): "ctime",
-            _("sort_size"): "size",
-            _("sort_type"): "type",
-        }
-        self.sort_combo.addItems(list(self._sort_keys.keys()))
+        self.sort_combo.setView(QListView())
+        self.sort_combo.addItems([
+            _("sort_order"),
+            _("sort_name"),
+            _("sort_mtime"),
+            _("sort_ctime"),
+            _("sort_size"),
+            _("sort_type")
+        ])
         self.sort_combo.setMaximumHeight(24)
-        self.sort_combo.setMinimumWidth(110)
+        self.sort_combo.setFixedWidth(120)
+        self.sort_combo.activated.connect(self.on_sort_combo_activated)
         sort_bar.addWidget(self.sort_combo)
-
-        self.sort_asc_btn = QPushButton("↑")
-        self.sort_asc_btn.setMaximumWidth(28)
-        self.sort_asc_btn.setMaximumHeight(24)
-        self.sort_asc_btn.clicked.connect(lambda: self.sort_files(ascending=True))
-        sort_bar.addWidget(self.sort_asc_btn)
-
-        self.sort_desc_btn = QPushButton("↓")
-        self.sort_desc_btn.setMaximumWidth(28)
-        self.sort_desc_btn.setMaximumHeight(24)
-        self.sort_desc_btn.clicked.connect(lambda: self.sort_files(ascending=False))
-        sort_bar.addWidget(self.sort_desc_btn)
 
         sort_bar.addStretch()
 
@@ -632,6 +678,7 @@ class RenamicaGUI(QMainWindow):
         file_layout.addLayout(sort_bar)
 
         self.file_list = DragDropListWidget(self)
+        self.file_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         file_layout.addWidget(self.file_list)
 
         button_layout = QHBoxLayout()
@@ -743,6 +790,7 @@ class RenamicaGUI(QMainWindow):
         delete_inner.addLayout(delete_input_layout)
 
         delete_n_layout = QHBoxLayout()
+        delete_n_layout.setSpacing(6)
         self.delete_n_checkbox = QCheckBox(_("del_check"))
         self.delete_n_checkbox.setMinimumHeight(24)
         delete_n_layout.addWidget(self.delete_n_checkbox)
@@ -892,8 +940,10 @@ class RenamicaGUI(QMainWindow):
     def update_preview(self):
         if not self.file_paths:
             self.conflict_label.setText("")
+            self.resolved_names = []
             return
 
+        self.resolved_names = self.calculate_resolved_names()
         conflicts = self.check_rename_conflicts()
         self.current_conflicts = conflicts
 
@@ -914,8 +964,7 @@ class RenamicaGUI(QMainWindow):
         file_path = self.file_paths[index]
         path_obj = Path(file_path)
         original_name = path_obj.name
-        rename_options = self.get_rename_options()
-        new_name = self.apply_rename_rules_preview(original_name, file_path, rename_options, index)
+        new_name = self.resolved_names[index] if index < len(self.resolved_names) else original_name
 
         item = self.file_list.item(index)
         if item is None:
@@ -1008,6 +1057,47 @@ class RenamicaGUI(QMainWindow):
 
         return new_name
 
+    def calculate_resolved_names(self):
+        resolved_names = []
+        if not self.file_paths:
+            return resolved_names
+
+        rename_options = self.get_rename_options()
+        allocated_paths = set()
+
+        for i, file_path in enumerate(self.file_paths):
+            original_name = Path(file_path).name
+            base_new_name = self.apply_rename_rules_preview(original_name, file_path, rename_options, i)
+            
+            if not base_new_name or not base_new_name.strip() or ILLEGAL_CHARS.search(base_new_name):
+                resolved_names.append(base_new_name)
+                if base_new_name:
+                    allocated_paths.add(str(Path(file_path).parent / base_new_name))
+                continue
+
+            parent_dir = Path(file_path).parent
+            new_name = base_new_name
+            new_path = parent_dir / new_name
+
+            if is_path_conflict(new_path, file_path, allocated_paths):
+                path_obj = Path(new_name)
+                stem = path_obj.stem
+                suffix = path_obj.suffix
+                counter = 1
+                while True:
+                    candidate_name = f"{stem}_{counter}{suffix}"
+                    candidate_path = parent_dir / candidate_name
+                    if not is_path_conflict(candidate_path, file_path, allocated_paths):
+                        new_name = candidate_name
+                        new_path = candidate_path
+                        break
+                    counter += 1
+
+            allocated_paths.add(str(new_path))
+            resolved_names.append(new_name)
+
+        return resolved_names
+
     def check_rename_conflicts(self):
         conflicts = {
             'has_conflict': False,
@@ -1017,13 +1107,8 @@ class RenamicaGUI(QMainWindow):
         if not self.file_paths:
             return conflicts
 
-        rename_options = self.get_rename_options()
-        target_path_map = {}
-
         for i, file_path in enumerate(self.file_paths):
-            original_name = Path(file_path).name
-            new_name = self.apply_rename_rules_preview(original_name, file_path,
-                                                       rename_options, i)
+            new_name = self.resolved_names[i] if i < len(self.resolved_names) else ""
             issues = []
 
             if not new_name or not new_name.strip():
@@ -1032,27 +1117,8 @@ class RenamicaGUI(QMainWindow):
                 illegal = ILLEGAL_CHARS.findall(new_name)
                 issues.append(f"{_('conflict_illegal')}: {', '.join(set(illegal))}")
 
-            if new_name and new_name != original_name:
-                new_path = Path(file_path).parent / new_name
-                if new_path.exists() and str(new_path) != file_path:
-                    issues.append(_("conflict_exists"))
-
-            if new_name:
-                new_target = str(Path(file_path).parent / new_name)
-                if new_target not in target_path_map:
-                    target_path_map[new_target] = []
-                target_path_map[new_target].append(i)
-
             if issues:
                 conflicts['file_conflicts'][i] = issues
-
-        for new_target, indices in target_path_map.items():
-            if len(indices) > 1:
-                for idx in indices:
-                    if idx not in conflicts['file_conflicts']:
-                        conflicts['file_conflicts'][idx] = []
-                    conflicts['file_conflicts'][idx].append(
-                        f"{_('conflict_duplicate')}: {Path(new_target).name}")
 
         total = sum(len(v) for v in conflicts['file_conflicts'].values())
         conflicts['total'] = total
@@ -1060,35 +1126,63 @@ class RenamicaGUI(QMainWindow):
 
         return conflicts
 
-    def sort_files(self, ascending=True):
+    def on_sort_combo_activated(self, index):
+        key = SORT_INDEX_TO_KEY.get(index)
+        if key == self.current_sort_key and key is not None:
+            self.current_sort_ascending = not self.current_sort_ascending
+        else:
+            self.current_sort_key = key
+            self.current_sort_ascending = True
+
+        self.sort_files_by_type(self.current_sort_key, self.current_sort_ascending)
+        self.update_sort_combo_text()
+
+    def update_sort_combo_text(self):
+        self.sort_combo.blockSignals(True)
+        keys = ["sort_order", "sort_name", "sort_mtime", "sort_ctime", "sort_size", "sort_type"]
+        for idx, key in enumerate(keys):
+            base_text = _(key)
+            if key == "sort_order":
+                self.sort_combo.setItemText(idx, base_text)
+            else:
+                associated_key = SORT_INDEX_TO_KEY.get(idx)
+                if associated_key == self.current_sort_key:
+                    arrow = " ↑" if self.current_sort_ascending else " ↓"
+                    self.sort_combo.setItemText(idx, base_text + arrow)
+                else:
+                    self.sort_combo.setItemText(idx, base_text)
+        self.sort_combo.blockSignals(False)
+
+    def sort_files_by_type(self, sort_type, ascending=True):
         if len(self.file_paths) < 2:
             return
 
-        sort_key_text = self.sort_combo.currentText()
         reverse = not ascending
 
-        file_infos = []
-        for path in self.file_paths:
-            try:
-                stat = os.stat(path)
-                file_infos.append((path, stat))
-            except OSError:
-                file_infos.append((path, None))
-
-        sort_type = self._sort_keys.get(sort_key_text)
-
-        if sort_type == "name":
-            key_func = lambda x: os.path.basename(x[0]).lower()
-        elif sort_type == "mtime":
-            key_func = lambda x: x[1].st_mtime if x[1] else 0
-        elif sort_type == "ctime":
-            key_func = lambda x: x[1].st_birthtime if x[1] else 0
-        elif sort_type == "size":
-            key_func = lambda x: x[1].st_size if x[1] else 0
-        elif sort_type == "type":
-            key_func = lambda x: Path(x[0]).suffix.lower()
+        if sort_type is None:
+            key_func = lambda x: self.original_file_paths.index(x[0]) if x[0] in self.original_file_paths else 999999
+            file_infos = [(path, None) for path in self.file_paths]
         else:
-            return
+            file_infos = []
+            for path in self.file_paths:
+                try:
+                    stat = os.stat(path)
+                    file_infos.append((path, stat))
+                except OSError:
+                    file_infos.append((path, None))
+
+            if sort_type == "name":
+                key_func = lambda x: os.path.basename(x[0]).lower()
+            elif sort_type == "mtime":
+                key_func = lambda x: x[1].st_mtime if x[1] else 0
+            elif sort_type == "ctime":
+                key_func = lambda x: x[1].st_birthtime if x[1] else 0
+            elif sort_type == "size":
+                key_func = lambda x: x[1].st_size if x[1] else 0
+            elif sort_type == "type":
+                key_func = lambda x: Path(x[0]).suffix.lower()
+            else:
+                return
 
         file_infos.sort(key=key_func, reverse=reverse)
         self.file_paths = [info[0] for info in file_infos]
@@ -1101,6 +1195,16 @@ class RenamicaGUI(QMainWindow):
             return
         self.file_paths[current_row], self.file_paths[current_row - 1] = \
             self.file_paths[current_row - 1], self.file_paths[current_row]
+        self.original_file_paths = self.file_paths.copy()
+
+        self.current_sort_key = None
+        self.current_sort_ascending = True
+
+        self.sort_combo.blockSignals(True)
+        self.sort_combo.setCurrentIndex(0)
+        self.sort_combo.blockSignals(False)
+        self.update_sort_combo_text()
+
         self.file_list.clear()
         self.update_preview()
         self.file_list.setCurrentRow(current_row - 1)
@@ -1111,6 +1215,16 @@ class RenamicaGUI(QMainWindow):
             return
         self.file_paths[current_row], self.file_paths[current_row + 1] = \
             self.file_paths[current_row + 1], self.file_paths[current_row]
+        self.original_file_paths = self.file_paths.copy()
+
+        self.current_sort_key = None
+        self.current_sort_ascending = True
+
+        self.sort_combo.blockSignals(True)
+        self.sort_combo.setCurrentIndex(0)
+        self.sort_combo.blockSignals(False)
+        self.update_sort_combo_text()
+
         self.file_list.clear()
         self.update_preview()
         self.file_list.setCurrentRow(current_row + 1)
@@ -1161,6 +1275,14 @@ class RenamicaGUI(QMainWindow):
         self.file_list.clear()
         self.update_preview()
         self.update_status(_("total_items", len(self.file_paths)))
+
+    def remove_files_at(self, indices):
+        for index in sorted(indices, reverse=True):
+            if 0 <= index < len(self.file_paths):
+                path = self.file_paths.pop(index)
+                if path in self.original_file_paths:
+                    self.original_file_paths.remove(path)
+        self.refresh_file_list()
 
     def save_rename_log(self, mappings):
         try:
@@ -1331,11 +1453,36 @@ class RenamicaGUI(QMainWindow):
                 border-radius: 6px;
             }
             QComboBox {
+                background-color: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #ffffff, stop: 1 #e8e8ed);
+                border: 1px solid #c0c0c5;
+                color: #1d1d1f;
                 padding: 3px 8px;
-                border: 1px solid #d1d1d6;
                 border-radius: 5px;
-                background-color: rgba(255, 255, 255, 0.9);
                 font-size: 11px;
+                min-height: 22px;
+            }
+            QComboBox:hover {
+                background-color: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #f5f5f7, stop: 1 #e0e0e5);
+                border: 1px solid #a0a0a5;
+            }
+            QComboBox QAbstractItemView {
+                background-color: white;
+                color: #1d1d1f;
+                border: 1px solid #d1d1d6;
+            }
+            QComboBox QAbstractItemView::item {
+                padding: 4px 8px;
+                color: #1d1d1f;
+            }
+            QComboBox QAbstractItemView::item:selected {
+                background-color: #007aff;
+                color: white;
+            }
+            QComboBox QAbstractItemView::item:hover {
+                background-color: #007aff;
+                color: white;
             }
             QComboBox:focus {
                 border: 2px solid #007aff;
@@ -1349,6 +1496,8 @@ class RenamicaGUI(QMainWindow):
                 border-left: 4px solid transparent;
                 border-right: 4px solid transparent;
                 border-top: 5px solid #666;
+                width: 0px;
+                height: 0px;
             }
             QWidget#status_container {
                 background-color: rgba(0, 0, 0, 0.03);
@@ -1501,12 +1650,36 @@ class RenamicaGUI(QMainWindow):
                     border-radius: 6px;
                 }
                 QComboBox {
-                    padding: 3px 8px;
-                    border: 1px solid #3d3d3d;
-                    border-radius: 5px;
-                    background-color: rgba(30, 30, 30, 0.9);
-                    font-size: 11px;
+                    background-color: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                        stop: 0 #3a3a3c, stop: 1 #2c2c2e);
+                    border: 1px solid #5a5a5c;
                     color: #f5f5f7;
+                    padding: 3px 8px;
+                    border-radius: 5px;
+                    font-size: 11px;
+                    min-height: 22px;
+                }
+                QComboBox:hover {
+                    background-color: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                        stop: 0 #4a4a4c, stop: 1 #3c3c3e);
+                    border: 1px solid #6a6a6c;
+                }
+                QComboBox QAbstractItemView {
+                    background-color: #2c2c2e;
+                    color: #f5f5f7;
+                    border: 1px solid #3d3d3d;
+                }
+                QComboBox QAbstractItemView::item {
+                    padding: 4px 8px;
+                    color: #f5f5f7;
+                }
+                QComboBox QAbstractItemView::item:selected {
+                    background-color: #0a84ff;
+                    color: white;
+                }
+                QComboBox QAbstractItemView::item:hover {
+                    background-color: #0a84ff;
+                    color: white;
                 }
                 QComboBox:focus {
                     border: 2px solid #0a84ff;
@@ -1520,6 +1693,8 @@ class RenamicaGUI(QMainWindow):
                     border-left: 5px solid transparent;
                     border-right: 5px solid transparent;
                     border-top: 6px solid #aaa;
+                    width: 0px;
+                    height: 0px;
                 }
                 QWidget#status_container {
                     background-color: rgba(0, 0, 0, 0.2);
@@ -1562,6 +1737,7 @@ class RenamicaGUI(QMainWindow):
         for p in resolved:
             if p not in self.file_paths:
                 self.file_paths.append(p)
+                self.original_file_paths.append(p)
 
         self.file_list.clear()
         self.update_preview()
@@ -1584,6 +1760,8 @@ class RenamicaGUI(QMainWindow):
 
     def clear_file_list(self):
         self.file_paths.clear()
+        self.original_file_paths.clear()
+        self.resolved_names.clear()
         self.file_list.clear()
         self.current_conflicts = {}
         self.conflict_label.setText("")
@@ -1636,6 +1814,7 @@ class RenamicaGUI(QMainWindow):
             QMessageBox.warning(self, _("dlg_warning"), _("dlg_no_files"))
             return
 
+        self.resolved_names = self.calculate_resolved_names()
         conflicts = self.check_rename_conflicts()
         if conflicts['has_conflict']:
             QMessageBox.warning(self, _("dlg_conflict_title"),
@@ -1650,7 +1829,7 @@ class RenamicaGUI(QMainWindow):
         self.progress_bar.setValue(0)
 
         options = self.get_rename_options()
-        self.worker = RenameWorker(self.file_paths.copy(), options, lang=self.lang)
+        self.worker = RenameWorker(self.file_paths.copy(), self.resolved_names.copy(), options, lang=self.lang)
         self.worker.progress_updated.connect(self.on_progress_updated)
         self.worker.finished.connect(self.on_rename_finished)
         self.worker.file_error.connect(self.on_file_error)
@@ -1711,7 +1890,7 @@ class RenamicaApp(QApplication):
         self._renamica_window = None
         self._pending_files = []
         self.setApplicationName("Renamica")
-        self.setApplicationVersion("1.0")
+        self.setApplicationVersion("1.0.1")
 
     def set_renamica_window(self, window):
         self._renamica_window = window
